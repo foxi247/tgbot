@@ -4,11 +4,13 @@ import asyncio
 import logging
 from typing import Any
 
-import anthropic
+import requests
 
 from src.config import Config
 
 logger = logging.getLogger(__name__)
+
+API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 
 class MinimaxClientError(Exception):
@@ -18,10 +20,10 @@ class MinimaxClientError(Exception):
 class MinimaxClient:
     def __init__(self, config: Config) -> None:
         self._config = config
-        self._client = anthropic.Anthropic(
-            api_key=config.anthropic_api_key,
-            base_url=config.anthropic_base_url,
-        )
+        self._headers = {
+            "Authorization": f"Bearer {config.mistral_api_key}",
+            "Content-Type": "application/json",
+        }
 
     def _make_request(
         self,
@@ -29,17 +31,19 @@ class MinimaxClient:
         temperature: float,
         max_tokens: int,
     ) -> str:
-        response = self._client.messages.create(
-            model=self._config.minimax_model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        # Extract text from the response
-        for block in response.content:
-            if hasattr(block, "text"):
-                return block.text
-        raise MinimaxClientError("Empty response from model")
+        data = {
+            "model": self._config.minimax_model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        response = requests.post(API_URL, headers=self._headers, json=data, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        try:
+            return result["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as e:
+            raise MinimaxClientError(f"Unexpected response format: {result}") from e
 
     async def generate_json(
         self,
@@ -52,31 +56,32 @@ class MinimaxClient:
         last_error: Exception | None = None
         for attempt in range(1, retries + 1):
             try:
-                logger.debug("MiniMax request attempt %d/%d", attempt, retries)
+                logger.debug("Mistral request attempt %d/%d", attempt, retries)
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(
                     None,
                     lambda: self._make_request(prompt, temperature, max_tokens),
                 )
-                logger.debug("MiniMax response received (%d chars)", len(result))
+                logger.debug("Mistral response received (%d chars)", len(result))
                 return result
-            except anthropic.RateLimitError as e:
-                wait = 2**attempt
-                logger.warning("Rate limited. Waiting %ds before retry.", wait)
-                last_error = e
-                await asyncio.sleep(wait)
-            except anthropic.APITimeoutError as e:
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code == 429:
+                    wait = 2**attempt
+                    logger.warning("Rate limited. Waiting %ds before retry.", wait)
+                    last_error = e
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error("HTTP error: %s", e)
+                    last_error = e
+                    if attempt < retries:
+                        await asyncio.sleep(2**attempt)
+            except requests.Timeout as e:
                 wait = 2**attempt
                 logger.warning("Timeout. Waiting %ds before retry.", wait)
                 last_error = e
                 await asyncio.sleep(wait)
-            except anthropic.APIError as e:
-                logger.error("API error: %s", e)
-                last_error = e
-                if attempt < retries:
-                    await asyncio.sleep(2**attempt)
             except Exception as e:
-                logger.error("Unexpected error calling MiniMax: %s", e)
+                logger.error("Unexpected error calling Mistral: %s", e)
                 last_error = e
                 break
 

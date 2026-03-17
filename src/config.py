@@ -15,9 +15,8 @@ class Config(BaseSettings):
     )
 
     telegram_bot_token: str
-    anthropic_base_url: str = "https://api.minimax.io/anthropic"
-    anthropic_api_key: str
-    minimax_model: str = "MiniMax-M2.5"
+    mistral_api_key: str
+    minimax_model: str = "mistral-small-latest"
 
     app_env: str = "dev"
     enable_test_unlock: bool = True
